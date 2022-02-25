@@ -9,7 +9,10 @@
 #include <sys/authorization.h>
 
 #define NL "\n"
-#define COPYRIGHT_LINE ""
+#define COPYRIGHT_LINE \
+    "Bug reports, feature requests to gemini|https://harkadev.com/oss" "\n" \
+    "Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com" "\n" \
+    ""
 
 const char help[] =
     "Usage: %s [-v][-a USER][-t TYPE][-m MODE] -i|r|s|d ID ..."  NL
