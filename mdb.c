@@ -8,7 +8,10 @@
 #include <sys/authorization.h>
 #include <sys/stat.h>
 #include <types/str.h>
+#include <types/bool_ss.h>
 #include <stdarg.h>
+#include <fcntl.h>
+#include <str/strdupa.h>
 
 
 #ifndef MDB_DEFAULT_DIRECTORY
@@ -17,54 +20,57 @@
 #ifndef MDB_MODE_DIR
 #  define MDB_MODE_DIR 0777
 #endif
-#ifndef MDB_MODE_FILE
-#  define MDB_MODE_FILE 0666
+#ifndef MDB_MAX_LEGS
+#  define MDB_MAX_LEGS 32
 #endif
 
+
 typedef struct mdb_leg {
-    GDBM_FILE   gdbm_data;
-    GDBM_FILE   gdbm_owner;
-    const char *datatype;
+    GDBM_FILE   gdbm;
+    str64       datatype;
     const char *mode;
+    unsigned    perm;
 } mdb_leg;
 
 struct mdb {
     const char *db_dir;
-    mdb_leg     legs[32];
+    mdb_leg     legs[MDB_MAX_LEGS];
     size_t      legsz;
     bool        verbose;
+    long      (*get_limit) (mdb *_db, cstr _opt_user, cstr _t);
 };
 
 typedef struct mdb_iter {
     mdb_leg *leg;
-    bool     not_first;
-    mdb_k    key;
+    mdb_k    next;
+    mdb_k    curr;
+    int      errcode;
     bool     success;
-    bool     filter_auth;
 } mdb_iter;
 
-
-    
-
-
+typedef struct mdb_auth {
+    char reserved;
+} mdb_auth;
 
 /* --------------------------------------------------------------------------
  * ---- INITIALIZATION AND CLEANUP ------------------------------------------
  * -------------------------------------------------------------------------- */
 
-bool mdb_create(mdb **_o, char *_opts[]) {
-    mdb        *o   = NULL;
-    char      **opt = NULL;
-    struct stat s   = {0};
-    int         res = 0;
+bool mdb_create(mdb **_db, cstr _opts[]) {
+    mdb         *o   = NULL;
+    cstr        *opt = NULL;
+    struct stat  s   = {0};
+    int          res = 0;
     /* Allocate memory. */
     o = calloc(1, sizeof(struct mdb));
     if (!o/*err*/) goto cleanup_errno;
     /* Get database directory. */
     o->db_dir = MDB_DEFAULT_DIRECTORY;
-    for (opt = _opts; _opts && !*opt; opt+=2) {
+    for (opt = _opts; _opts && *opt; opt+=2) {
         if (!strcasecmp(*opt, "mdb_directory")) {
             o->db_dir = *(opt+1);
+        } else if (!strcasecmp(*opt, "mdb_verbose")) {
+            bool_parse(&o->verbose, *(opt+1), NULL);
         }
     }
     /* Check whether it exists. If not try to create it. */
@@ -79,165 +85,231 @@ bool mdb_create(mdb **_o, char *_opts[]) {
     res = access(o->db_dir, R_OK|X_OK);
     /* No read access. */
     if (res==-1/*err*/) goto cleanup_errno_no_read_access;
-    *_o = o;
+    *_db = o;
+    if (o->verbose) {
+        syslog(LOG_INFO, "MDB: Database started.");
+    }
     return true;
  cleanup_errno:
-    syslog(LOG_ERR, "%s", strerror(errno));
+    syslog(LOG_ERR, "MDB: %s", strerror(errno));
     goto cleanup;
  cleanup_errno_mkdir:
-    syslog(LOG_ERR, "Can't create %s: %s", o->db_dir, strerror(errno));
+    syslog(LOG_ERR, "MDB: Can't create %s: %s", o->db_dir, strerror(errno));
     goto cleanup;
  cleanup_errno_notdir:
-    syslog(LOG_ERR, "%s not a directory.", o->db_dir);
+    syslog(LOG_ERR, "MDB: %s not a directory.", o->db_dir);
     goto cleanup;
  cleanup_errno_no_read_access:
-    syslog(LOG_ERR, "Can't read %s.", o->db_dir);
+    syslog(LOG_ERR, "MDB: Can't read %s.", o->db_dir);
     goto cleanup;
  cleanup:
     if (o) free(o);
     return false;
 }
 
-void mdb_destroy(mdb *_o) {
-    if (_o) {
-        for (int i=0; i<_o->legsz; i++) {
-            if (_o->legs[i].gdbm_data) {
-                gdbm_close(_o->legs[i].gdbm_data);
+void mdb_destroy(mdb *_db) {
+    if (_db) {
+        for (int i=0; i<_db->legsz; i++) {
+            if (_db->verbose && _db->legs[i].gdbm) {
+                syslog(LOG_INFO, "MDB: %s: Closing ...", _db->legs[i].datatype);
             }
-            if (_o->legs[i].gdbm_owner) {
-                gdbm_close(_o->legs[i].gdbm_owner);
-            }
+            mdb_leg_close(&_db->legs[i]);
         }
-        free(_o);
+        if (_db->verbose) {
+            syslog(LOG_INFO, "MDB: All databases closed.");
+        }
+        free(_db);
     }
 }
 
-bool mdb_open(mdb  *_o, const char _t[], const char _mode[]) {
-    return mdb_open_f(_o, _t, _mode, NULL);
+
+/* --------------------------------------------------------------------------
+ * ---- LEGS ----------------------------------------------------------------
+ * -------------------------------------------------------------------------- */
+
+void mdb_leg_close(mdb_leg *_leg) {
+    if (_leg->gdbm) {
+        gdbm_close(_leg->gdbm);
+    }
+    memset(_leg, 0, sizeof(mdb_leg));
 }
 
-bool mdb_open_f(mdb  *_o, const char _t[], const char _mode[], const char *_fmt, ...) {
-    strpath filename1 = {0};
-    strpath filename2 = {0};
-    int l; va_list va;
-    mdb_leg *leg = NULL;
-
-    /* Calculate filename prefix. */
-    l = snprintf(filename1, sizeof(filename1), "%s/%s%s", _o->db_dir, _t, (_fmt)?".":"");
-    if (l >= sizeof(filename1) /*err*/) goto cleanup_name_too_long;
-    if (_fmt) {
-        va_start(va, _fmt);
-        l += vsnprintf(filename1+l, sizeof(filename1)-l, _fmt, va);
-        va_end(va);
-        if (l >= sizeof(filename1)/*err*/) goto cleanup_name_too_long;
-    }
-    /* Copy and set suffix. */
-    memcpy(filename2, filename1, l);
-    l += snprintf(filename1+l, sizeof(filename1)-l, ".data");
-    l += snprintf(filename2+l, sizeof(filename2)-l, ".owner");
-
-    /* Calculate flags. */
+bool mdb_leg_open (mdb_leg *_leg, cstr _filename, cstr _t, cstr _mode, unsigned _chmod) {
     int flags = 0;
+    struct stat s;
     if (strchr(_mode, 'w')) {
         flags |= GDBM_WRCREAT;
-    } else {
+    } else if (stat(_filename, &s)!=-1) {
         flags |= GDBM_READER;
+    } else if (errno == ENOENT) {
+        flags |= GDBM_WRCREAT;
+    } else {
+        syslog(LOG_ERR, "MDB: %s: %s", _t, strerror(errno));
+        return false;
     }
     if (strchr(_mode, 's')) {
         flags |= GDBM_SYNC;
     }
-    
-    /* Default mode. */
-    int mode = MDB_MODE_FILE;
-    
-    /* Open files. */
-    leg = &_o->legs[_o->legsz];
-    leg->gdbm_data  = gdbm_open(filename1, 0, flags, mode, NULL);
-    if (!leg->gdbm_data/*err*/) goto cleanup_gdbm_error;
-    if (strchr(_mode, 'o')) {
-        leg->gdbm_owner = gdbm_open(filename2, 0, flags, mode, NULL);
-        if (!leg->gdbm_owner/*err*/) goto cleanup_gdbm_error;
-    }
-    leg->datatype = _t;
-    leg->mode     = _mode;
-    _o->legsz++;
-    
-    /* Return success. */
-    if (_o->verbose) {
-        if (leg->gdbm_data) {
-            syslog(LOG_INFO, "mdb: Opened %s", filename1);
+    _leg->gdbm  = gdbm_open(_filename, 0, flags, _chmod, NULL);
+    if (!_leg->gdbm) {
+        syslog(LOG_ERR, "MDB: %s: %s", _t, gdbm_strerror(gdbm_errno));
+        if (gdbm_check_syserr(gdbm_errno)) {
+            syslog(LOG_ERR, "MDB: %s: %s", _t, strerror(errno));
         }
-        if (leg->gdbm_owner) {
-            syslog(LOG_INFO, "mdb: Opened %s", filename2);
+        mdb_leg_close(_leg);
+        return false;
+    }
+    chmod(_filename, _chmod);
+    strncpy(_leg->datatype, _t, sizeof(_leg->datatype)-1);
+    _leg->mode     = _mode;
+    _leg->perm     = _chmod;
+    return true;
+}
+
+bool mdb_leg_match(mdb_leg *_leg, cstr _opt_t, cstr _opt_mode) {
+    cstr c;
+    if (!_opt_t && !_opt_mode) {
+        if (_leg->gdbm) {
+            return false;
+        }
+    } else {
+        if (!_leg->gdbm) {
+            return false;
+        }
+        if (_opt_t && strcmp(_leg->datatype, _opt_t)) {
+            return false;
+        }
+        if (_opt_mode) {
+            for (c = _opt_mode; *c; c++) {
+                if (!strchr(_leg->mode, *c)) {
+                    return false;
+                }
+            }
         }
     }
     return true;
- cleanup_name_too_long:
-    syslog(LOG_ERR, "mdb: mdb_open_f(%s): Path too long.", _t);
-    goto cleanup;
- cleanup_gdbm_error:
-    syslog(LOG_ERR, "mdb: %s", gdbm_strerror(gdbm_errno));
-    goto cleanup;
- cleanup:
-    if (leg) {
-        if (leg->gdbm_data)  gdbm_close(leg->gdbm_data);
-        if (leg->gdbm_owner) gdbm_close(leg->gdbm_owner);
-        leg->gdbm_data  = NULL;
-        leg->gdbm_owner = NULL;
+}
+
+mdb_leg *mdb_leg_search(mdb *_db, cstr _opt_t, cstr _opt_mode) {
+    for (size_t l=0; l<((!_opt_t && !_opt_mode)?MDB_MAX_LEGS:_db->legsz); l++) {
+        if (mdb_leg_match(&_db->legs[l], _opt_t, _opt_mode)) {
+            if (l >= _db->legsz) _db->legsz = l+1;
+            return &_db->legs[l];
+        }
     }
+    return NULL;
+}
+
+
+/* --------------------------------------------------------------------------
+ * ---- OPEN TYPES ----------------------------------------------------------
+ * -------------------------------------------------------------------------- */
+
+bool mdb_open(mdb *_db, cstr _t, cstr _mode, unsigned _chmod) {
+    return mdb_open_f(_db, _t, _mode, _chmod, NULL);
+}
+
+bool mdb_open_f(mdb *_db, cstr _t, cstr _mode, unsigned _chmod, cstr _fmt, ...) {
+    strpath  f    = {0};
+    int      fsz  = 0;
+    mdb_leg *leg  = NULL;
+    
+    /* Get a leg. */
+    leg = mdb_leg_search(_db, _t, NULL);
+    if (leg) {
+        if (mdb_leg_match(leg, NULL, _mode)) {
+            return true;
+        } else {
+            mdb_leg_close(leg);
+        }
+    } else {
+        leg = mdb_leg_search(_db, NULL, NULL);
+        if (!leg/*err*/) goto cleanup_limit_reached;
+    }
+    
+    /* Calculate filename. */
+    fsz += snprintf(f, sizeof(f), "%s/%s%s", _db->db_dir, _t, (_fmt)?".":"");
+    if (fsz >= sizeof(f) /*err*/) goto cleanup_name_too_long;
+    if (_fmt) {
+        va_list va;
+        va_start(va, _fmt);
+        fsz += vsnprintf(f+fsz, sizeof(f)-fsz, _fmt, va);
+        va_end(va);
+        if (fsz >= sizeof(f)/*err*/) goto cleanup_name_too_long;
+    }
+    fsz += snprintf(f+fsz, sizeof(f)-fsz, ".data");
+    if (fsz >= sizeof(f)/*err*/) goto cleanup_name_too_long;
+
+    /* Open leg. */
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Openning %s ...", _t, f);
+    }
+    return mdb_leg_open(leg, f, _t, _mode, _chmod);
+    
+    /* Failures. */
+ cleanup_limit_reached:
+    syslog(LOG_ERR, "MDB: %s: Too much tables openned.", _t);
     return false;
+ cleanup_name_too_long:
+    syslog(LOG_ERR, "MDB: %s: Name too long.", _t);
+    return false;
+}
+
+void mdb_close(mdb *_db, cstr _t) {
+    mdb_leg *leg = mdb_leg_search(_db, _t, "");
+    if (leg) {
+        mdb_leg_close(leg);
+    }
 }
 
 /* --------------------------------------------------------------------------
  * ---- OPERATIONS ----------------------------------------------------------
  * -------------------------------------------------------------------------- */
 
-bool mdb_get_leg(mdb *_o, const char _t[], bool _write, mdb_leg **_out) {
-    for (int i=0; i<_o->legsz; i++) {
-        if (strcmp(_t, _o->legs[i].datatype)) continue;
-        if (_write && (!strchr(_o->legs[i].mode,'w'))) {
-            syslog(LOG_ERR, "mdb: Datatype %s not openned for writting.", _t);
-            return false;
-        }
-        *_out  = &_o->legs[i];
-        return true;
-    }
-    syslog(LOG_ERR, "mdb: Datatype %s not openned.", _t);
-    return false;
-}
-
-bool mdb_insert(mdb *_o, const char _t[], mdb_k _id, const void *_d, size_t _dsz) {
-    mdb_leg *leg;
-    if (!mdb_get_leg(_o, _t, true, &leg)) return false;
+bool mdb_insert(mdb *_db, cstr _t, mdb_k _id, const void *_d, size_t _dsz) {
+    mdb_leg *leg = mdb_leg_search(_db, _t, "w");
+    if (!leg/*err*/) goto fail_not_openned;
     datum d = {.dptr = (void*)_d, .dsize = _dsz };
-    int r = gdbm_store(leg->gdbm_data, _id, d, GDBM_INSERT);
+    int r = gdbm_store(leg->gdbm, _id, d, GDBM_INSERT);
     if (r==-1/*err*/) goto fail_gdbm;
     if (r==+1/*err*/) goto fail_exists;
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Inserted %li bytes.", _t, _dsz);
+    }
     return true;
  fail_gdbm:
-    syslog(LOG_ERR, "mdb: mdb_insert: %s", gdbm_strerror(gdbm_errno));
+    syslog(LOG_ERR, "MDB: %s: Invalid key or data.", _t);
     return false;
  fail_exists:
-    syslog(LOG_ERR, "mdb: mdb_insert: Already exists.");
+    syslog(LOG_ERR, "MDB: %s: Object already exists.", _t);
+    return false;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned.", _t);
     return false;
 }
 
-bool mdb_replace(mdb *_o, const char _t[], mdb_k _id, const void *_d, size_t _dsz) {
-    mdb_leg *leg;
-    if (!mdb_get_leg(_o, _t, true, &leg)) return false;
+bool mdb_replace(mdb *_db, cstr _t, mdb_k _id, const void *_d, size_t _dsz) {
+    mdb_leg *leg = mdb_leg_search(_db, _t, "w");
+    if (!leg/*err*/) goto fail_not_openned;
     datum d = {.dptr = (void*)_d, .dsize = _dsz };
-    int r = gdbm_store(leg->gdbm_data, _id, d, GDBM_REPLACE);
+    int r = gdbm_store(leg->gdbm, _id, d, GDBM_REPLACE);
     if (r==-1/*err*/) goto fail_gdbm;
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Replaced %li bytes.", _t, _dsz);
+    }
     return true;
  fail_gdbm:
-    syslog(LOG_ERR, "mdb: mdb_replace: %s", gdbm_strerror(gdbm_errno));
+    syslog(LOG_ERR, "MDB: %s: Invalid key or data.", _t);
+    return false;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned for writting.", _t);
     return false;
 }
 
-bool mdb_search(mdb *_o, const char _t[], mdb_k _id, void **_d, size_t *_dsz, bool *_opt_exists) {
-    mdb_leg *leg;
-    if (!mdb_get_leg(_o, _t, false, &leg)) return false;
-    datum d = gdbm_fetch(leg->gdbm_data, _id);
+bool mdb_search(mdb *_db, cstr _t, mdb_k _id, void **_d, size_t *_dsz, bool *_opt_exists) {
+    mdb_leg *leg = mdb_leg_search(_db, _t, "r");
+    if (!leg/*err*/) goto fail_not_openned;
+    datum d = gdbm_fetch(leg->gdbm, _id);
     if (!d.dptr/*err*/) goto fail_fetch;
     if (_d) {
         *_d = d.dptr;
@@ -250,23 +322,32 @@ bool mdb_search(mdb *_o, const char _t[], mdb_k _id, void **_d, size_t *_dsz, bo
     if (_opt_exists) {
         *_opt_exists = true;
     }
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Retrieved data", _t);
+    }
     return true;
  fail_fetch:
     if (_d)   *_d   = NULL;
     if (_dsz) *_dsz = 0;
     if (_opt_exists) {
         *_opt_exists = false;
-        return (gdbm_errno == GDBM_ITEM_NOT_FOUND)?true:false;
+        if (gdbm_errno == GDBM_ITEM_NOT_FOUND) {
+            syslog(LOG_INFO, "MDB: %s: Field does not exist.", _t);
+            return true;
+        }
     }
-    syslog(LOG_ERR, "mdb: mdb_search: %i, %s", _id.dsize, gdbm_strerror(gdbm_errno));
+    syslog(LOG_ERR, "MDB: %s: Can't read: %s", _t, gdbm_strerror(gdbm_errno));
+    return false;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned for reading.", _t);
     return false;
 }
 
-bool mdb_search_cp(mdb *_o, const char _t[], mdb_k _id, void *_d, size_t _dsz, bool *_opt_exists) {
+bool mdb_search_cp(mdb *_db, cstr _t, mdb_k _id, void *_d, size_t _dsz, bool *_opt_exists) {
     void  *d   = NULL;
     size_t dsz = 0;
     bool   ret = false;
-    if (!mdb_search(_o, _t, _id, &d, &dsz, _opt_exists)) return false;
+    if (!mdb_search(_db, _t, _id, &d, &dsz, _opt_exists)) return false;
     if (d) {
         if (_dsz < dsz/*err*/) goto cleanup_invalid_size;
         memcpy(_d, d, dsz);
@@ -274,51 +355,60 @@ bool mdb_search_cp(mdb *_o, const char _t[], mdb_k _id, void *_d, size_t _dsz, b
     ret = true;
     goto cleanup;
  cleanup_invalid_size:
-    syslog(LOG_ERR, "Got invalid sized data.");
+    syslog(LOG_ERR, "MDB: Got invalid sized data.");
     goto cleanup;
  cleanup:
     if (d) free(d);
     return ret;
 }
 
-bool mdb_delete(mdb *_o, const char _t[], mdb_k _id) {
-    mdb_leg *leg;
-    if (!mdb_get_leg(_o, _t, true, &leg)) return false;
-    gdbm_delete(leg->gdbm_data, _id);
+bool mdb_delete(mdb *_db, cstr _t, mdb_k _id) {
+    mdb_leg *leg = mdb_leg_search(_db, _t, "w");
+    if (!leg/*err*/) goto fail_not_openned;
+    gdbm_delete(leg->gdbm, _id);
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Field deleted.", _t);
+    }
     return true;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned.", _t);
+    return false;
 }
 
 /* --------------------------------------------------------------------------
  * ---- LOOPS ---------------------------------------------------------------
  * -------------------------------------------------------------------------- */
 
-bool mdb_iter_create(mdb *_o, const char _t[], bool _filter_auth, mdb_iter **_iter) {
-    mdb_leg *leg = NULL;
+bool mdb_iter_create(mdb *_db, cstr _t, mdb_iter **_iter) {
     mdb_iter_destroy(_iter);
-    if (!mdb_get_leg(_o, _t, false, &leg)) return false;
-    if (_filter_auth && leg->gdbm_owner && !authorization_get_username()) {
-        syslog(LOG_ERR, "Not logged in");
-        return false;
-    }
-    *_iter = calloc(1, sizeof(mdb_leg));
-    if (!*_iter) {
-        syslog(LOG_ERR, "%s", strerror(errno));
-        return false;
-    }
+    mdb_leg *leg = mdb_leg_search(_db, _t, "r");
+    if (!leg/*err*/) goto cleanup_not_openned;
+    *_iter = calloc(1, sizeof(mdb_iter));
+    if (!*_iter/*err*/) goto cleanup_errno;    
     (*_iter)->leg       = leg;
-    (*_iter)->not_first = false;
-    (*_iter)->key.dptr  = NULL;
-    (*_iter)->key.dsize = 0;
+    (*_iter)->next      = gdbm_firstkey(leg->gdbm);
     (*_iter)->success   = true;
-    (*_iter)->filter_auth = _filter_auth;
+    if (!(*_iter)->next.dptr) {
+        (*_iter)->errcode = gdbm_errno;
+    }
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Iteration start.", _t);
+    }
     return true;
+ cleanup_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned.", _t);
+    return false;
+ cleanup_errno:
+    syslog(LOG_ERR, "MDB: %s: %s", _t, strerror(errno));
+    return false;
 }
 
 bool mdb_iter_destroy(mdb_iter **_iter) {
     bool res = true;
     if (*_iter) {
         res = (*_iter)->success;
-        free((*_iter)->key.dptr);
+        free((*_iter)->next.dptr);
+        free((*_iter)->curr.dptr);
         free((*_iter));
         *_iter = NULL;
     }
@@ -326,105 +416,93 @@ bool mdb_iter_destroy(mdb_iter **_iter) {
 }
 
 bool mdb_iter_loop(mdb_iter *_iter, mdb_k *_key) {
-    datum d;
-    if (!_iter->not_first) {
-        d = gdbm_firstkey(_iter->leg->gdbm_data);
-        _iter->not_first = true;
-    } else {
-        d = gdbm_nextkey(_iter->leg->gdbm_data, _iter->key);
-        free(_iter->key.dptr);
+    if (_iter->curr.dptr) {
+        free(_iter->curr.dptr);
+        _iter->curr.dptr = NULL;
     }
-    _iter->key = d;
-    if (d.dptr) {
-        *_key = _iter->key;
-        _iter->success = true;
-        if (_iter->filter_auth && _iter->leg->gdbm_owner) {
-            const char *user = authorization_get_username();
-            if (!user) return mdb_iter_loop(_iter, _key);
-            datum owner = gdbm_fetch(_iter->leg->gdbm_owner, _iter->key);
-            if (!owner.dptr) return mdb_iter_loop(_iter, _key);
-            if (strcmp(user, owner.dptr)) {
-                free(owner.dptr);
-                return mdb_iter_loop(_iter, _key);
-            }
+    if (!_iter->next.dptr) {
+        if (_iter->errcode != GDBM_ITEM_NOT_FOUND) {
+            syslog(LOG_ERR, "%s", gdbm_strerror(_iter->errcode));
+            _iter->success = false;
         }
-        return true;
-    } else if (gdbm_errno == GDBM_ITEM_NOT_FOUND) {
-        _iter->success = true;
-        return false;
-    } else {
-        syslog(LOG_ERR, "%s", gdbm_strerror(gdbm_errno));
-        _iter->success = false;
         return false;
     }
+    _iter->curr = _iter->next;
+    _iter->next = gdbm_nextkey(_iter->leg->gdbm, _iter->curr);
+    if (!_iter->next.dptr) {
+        _iter->errcode = gdbm_errno;
+    }
+    *_key = _iter->curr;
+    return true;
 }
 
 /* --------------------------------------------------------------------------
  * ---- AUTHORIZATION -------------------------------------------------------
  * -------------------------------------------------------------------------- */
 
-bool mdb_authorized(mdb *_o, const char _t[], mdb_k _id, const char *_opt_user) {
-    mdb_leg    *leg    = NULL;
-    bool        retval = false;
-    datum       d      = {NULL,0};
-    int         res    = 0;
-    const char *user   = NULL;
-    res = mdb_get_leg(_o, _t, false, &leg);
-    if (!res/*err*/) goto cleanup;
-    if (!leg->gdbm_owner) { /* Not openned with 'o' */
-        retval = true;
-        goto cleanup;
-    }
-    if (_opt_user) {
-        user = _opt_user;
-    } else {
-        user = authorization_get_username();
-        if (!user/*err*/) goto cleanup_not_logged_in;
-    }
-    d = gdbm_fetch(leg->gdbm_owner, _id);
-    if (!d.dptr/*err*/) goto cleanup_cant_get_ownership;
-    res = !strcmp(d.dptr, user);
-    if (!res/*err*/) goto cleanup_not_authorized;
-    retval = true;
-    goto cleanup;
- cleanup_not_logged_in:
-    syslog(LOG_ERR, "Not logged in");
-    goto cleanup;
- cleanup_cant_get_ownership:
-    syslog(LOG_ERR, "Can't get ownership. [1]");
-    goto cleanup;
- cleanup_not_authorized:
-    syslog(LOG_ERR, "Not authorized.");
-    goto cleanup;
- cleanup:
-    if (d.dptr) free(d.dptr);
-    return retval;
+static
+bool mdb_auth_init (mdb *_db, cstr _t) {
+    int         res  = 0;
+    const char *user = NULL;
+    const char *type = strcata(_t,".auth");
+    mdb_leg    *leg  = mdb_leg_search(_db, _t, "");
+    if (!leg/*err*/) goto fail_not_openned;
+    user = authorization_get_username();
+    if (!user/*err*/) goto fail_unauthenticated;
+    res = mdb_open_f(_db, type, "rw", leg->perm, "%s", user);
+    if (!res/*err*/) return false;
+    return true;
+ fail_unauthenticated:
+    syslog(LOG_ERR, "MDB: Auth %s: Unauthenticated", _t);
+    return false;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: Auth %s: Not openned.", _t);
+    return false;
 }
 
-bool mdb_set_owner (mdb *_o, const char _t[], mdb_k _id, const char *_opt_user) {
-    mdb_leg    *leg    = NULL;
-    const char *user   = NULL;
-    int         res    = 0;
-    if (_opt_user) {
-        user = _opt_user;
-    } else {
-        user = authorization_get_username();
-        if (!user/*err*/) goto cleanup_not_logged_in;
-    }
-    res = mdb_get_leg(_o, _t, false, &leg);
-    if (!res/*err*/) goto cleanup;
-    if (!leg->gdbm_owner/*err*/) goto cleanup_cant_set_ownership;
-    res = gdbm_store(leg->gdbm_owner, _id, mdb_k_str(user), GDBM_REPLACE);
-    if (res==-1/*err*/) goto cleanup_cant_set_ownership;
+bool mdb_auth_insert_owner (mdb *_db, cstr _t, mdb_k _key) {
+    int         res;
+    mdb_auth    info = {0};
+    const char *type = strcata(_t,".auth");
+    res = mdb_auth_init(_db, _t);
+    if (!res/*err*/) return false;
+    return mdb_insert(_db, type, _key, &info, sizeof(info));
+}
+
+bool mdb_auth_check_owner (mdb *_db, cstr _t, mdb_k _key) {
+    int         res;
+    const char *type = strcata(_t,".auth");
+    res = mdb_auth_init(_db, _t);
+    if (!res/*err*/) return false;
+    res = mdb_search(_db, type, _key, NULL, NULL, NULL);
+    if (!res/*err*/) return false;
     return true;
- cleanup_not_logged_in:
-    syslog(LOG_ERR, "Not logged in");
+}
+
+bool mdb_auth_delete (mdb *_db, cstr _t, mdb_k _key) {
+    int res = mdb_auth_init(_db, _t);
+    if (!res/*err*/) return false;
+    mdb_leg *leg1 = mdb_leg_search(_db, _t, "w");
+    mdb_leg *leg2 = mdb_leg_search(_db, strcata(_t,".auth"), "w");
+    if (!leg1/*err*/) return false;
+    if (!leg2/*err*/) goto fail_not_openned;
+    if (gdbm_delete(leg2->gdbm, _key)==0) {
+        gdbm_delete(leg1->gdbm, _key);
+    }
+    if (_db->verbose) {
+        syslog(LOG_INFO, "MDB: %s: Deleted authenticated.", _t);
+    }
+    return true;
+ fail_not_openned:
+    syslog(LOG_ERR, "MDB: %s: Not openned.", _t);
     return false;
- cleanup_cant_set_ownership:
-    syslog(LOG_ERR, "Can't set ownership.");
-    return false;
- cleanup:
-    return false;
+}
+
+bool mdb_auth_iter_create(mdb *_db, cstr _t, mdb_iter **_iter) {
+    int res = 0;
+    res = mdb_auth_init(_db, _t);
+    if (!res/*err*/) return false;
+    return mdb_iter_create(_db, strcata(_t,".auth"), _iter);
 }
 
 
@@ -449,30 +527,23 @@ mdb_k mdb_k_uuid_new (uuid_t _uuid) {
     return mdb_k_uuid(_uuid);
 }
 
-mdb_k mdb_k_str (const char *_s) {
-    mdb_k k = {(char*)_s, strlen(_s)+1};
-    return k;
-}
-
-mdb_k mdb_k_uuid_str (const char *_s, uuid_t _uuid) {
-    if (uuid_parse(_s, _uuid)!=-1) {
-        return mdb_k_uuid(_uuid);
+mdb_k mdb_k_str (cstr _s) {
+    if (_s) {
+        mdb_k k = {(char*)_s, strlen(_s)+1};
+        return k;
     } else {
-        mdb_k k = {0};
-        syslog(LOG_ERR, "Invalid UUID: %s", _s);
+        mdb_k k = {NULL, 0};
         return k;
     }
 }
 
-bool uuid_parse_nn(const char *_s, uuid_t _uuid) {
-    if (uuid_parse(_s, _uuid)==-1) {
-        syslog(LOG_ERR, "Invalid UUID: %s", _s);
-        return false;
-    } else if (uuid_is_null(_uuid)) {
-        syslog(LOG_ERR, "NUll UUID: %s", _s);
-        return false;
+mdb_k mdb_k_uuid_str (cstr _s, uuid_t _uuid) {
+    if (uuid_parse(_s, _uuid)!=-1) {
+        return mdb_k_uuid(_uuid);
     } else {
-        return true;
+        mdb_k k = {0};
+        syslog(LOG_ERR, "MDB: Invalid UUID: %s", _s);
+        return k;
     }
 }
 

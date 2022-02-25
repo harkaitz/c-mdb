@@ -5,42 +5,43 @@
 #include <syslog.h>
 #include <errno.h>
 #include <io/fcopy.h>
+#include <io/mconfig.h>
 #include <sys/authorization.h>
 
+#define NL "\n"
 #define COPYRIGHT_LINE ""
 
 const char help[] =
-    "Usage: %s [-v][-a USER][-t TYPE][-m MODE] -i|r|s|d ID ..."  "\n"
-    ""                                                       "\n"
-    "    -i ID TEXT   : Insert data. You can use `uuidgen`." "\n"
-    "    -r ID TEXT   : Replace data."                       "\n"
-    "    -s ID        : Get data."                           "\n"
-    "    -d ID        : Delete data."                        "\n"
-    "    -l           : List IDs."                           "\n"
-    "    -c ID        : Check whether it is owned by user."  "\n"
-    "    -o ID        : Set ownershop of ID."                "\n"
-    ""                                                       "\n"
+    "Usage: %s [-v][-a USER][-t TYPE][-m MODE] -i|r|s|d ID ..."  NL
+    ""                                                           NL
+    "    -i ID TEXT   : Insert data. You can use `uuidgen`."     NL
+    "    -r ID TEXT   : Replace data."                           NL
+    "    -s ID        : Get data."                               NL
+    "    -d ID        : Delete data."                            NL
+    "    -l           : List data keys."                         NL
+    "    -c           : Enable ownership."                       NL
+    "    -L           : List owned."                             NL
+    ""                                                           NL
     COPYRIGHT_LINE;
     
 
 int main (int _argc, char *_argv[]) {
 
-    char     cmd      = '\0';
-    int      opt      = 0;
-    char    *id       = NULL;
-    char    *datatype = "mdb_text1";
-    char    *mode     = "rwos";
-    int      retval   = 1;
-    int      res      = 0;
-    mdb     *db       = NULL;
-    char    *m        = NULL;
-    size_t   m_size   = 0;
-    FILE    *m_fp     = NULL;
-    void     *d        = NULL;
-    size_t    d_size   = 0;
-    bool      d_exists = false;
-    mdb_iter *iter     = {0};
-    mdb_k     key      = {0};
+    char      cmd            = '\0';
+    int       opt,res;
+    char     *datatype       = "mdb-cli-1";
+    char     *mode           = "rws";
+    int       retval         = 1;
+    mdb      *db             = NULL;
+    char     *m              = NULL;
+    size_t    m_size         = 0;
+    FILE     *m_fp           = NULL;
+    void     *d              = NULL;
+    size_t    d_size         = 0;
+    mdb_iter *iter           = {0};
+    mdb_k     id_k           = {0};
+    bool      ownership_p    = false;
+    mconfig_t mconfig        = MCONFIG_INITIALIZER();
     
     /* Help and logging. */
     _argv[0] = basename(_argv[0]);
@@ -51,35 +52,25 @@ int main (int _argc, char *_argv[]) {
     openlog(_argv[0], LOG_PERROR, LOG_USER);
     
     /* Parse options. */
-    while((opt = getopt (_argc, _argv, "a:t:m:i:r:s:d:lc:o:")) != -1) {
+    while((opt = getopt (_argc, _argv, "va:t:m:i:r:s:d:lc")) != -1) {
         switch (opt) {
-        case 'a':
-            res = authorization_open(optarg);
-            if (!res/*err*/) goto cleanup;
-            break;
-        case 't':
-            datatype = optarg;
-            break;
-        case 'm':
-            mode = optarg;
-            break;
-        case 'i': case 'r': case 's': case 'd': case 'l': case 'c': case 'o':
-            cmd = opt;
-            id  = optarg;
-            break;
+        case 'v': mconfig_add(&mconfig, "mdb_verbose", "true", NULL); break;
+        case 'a': if (!authorization_open(optarg)) { goto cleanup; } break;
+        case 't': datatype = optarg; break;
+        case 'm': mode = optarg; break;
+        case 'i': case 'r': case 's': case 'd': case 'l': cmd = opt; id_k = mdb_k_str(optarg); break;
+        case 'c': ownership_p  = true; break;
         case '?':
         default:
             return 1;
         }
     }
-
-    /* Check for required parameters. */
     if (!cmd/*err*/) goto cleanup_missing_params;
 
     /* Open database. */
-    res = mdb_create(&db, NULL);
+    res = mdb_create(&db, mconfig.v);
     if (!res/*err*/) goto cleanup;
-    res = mdb_open(db, datatype, mode);
+    res = mdb_open(db, datatype, mode, 0666);
     if (!res/*err*/) goto cleanup;
 
     /* Get the data. */
@@ -95,45 +86,55 @@ int main (int _argc, char *_argv[]) {
             if (!res/*err*/) goto cleanup_errno;
         }
     }
-
     /* Perform operations. */
     switch (cmd) {
     case 'i':
-        res = mdb_insert(db, datatype, mdb_k_str(id), m, m_size);
-        if (!res/*err*/) goto cleanup_errno;
+        if (ownership_p) {
+            res = mdb_auth_insert_owner(db, datatype, id_k);
+            if (!res/*err*/) goto cleanup;
+        }
+        res = mdb_insert(db, datatype, id_k, m, m_size);
+        if (!res/*err*/) goto cleanup;
         break;
     case 'r':
-        res = mdb_replace(db, datatype, mdb_k_str(id), m, m_size);
-        if (!res/*err*/) goto cleanup_errno;
+        if (ownership_p) {
+            res = mdb_auth_check_owner(db, datatype, id_k);
+            if (!res/*err*/) goto cleanup;
+        }
+        res = mdb_replace(db, datatype, id_k, m, m_size);
+        if (!res/*err*/) goto cleanup;
+        
         break;
     case 's':
-        res = mdb_search(db, datatype, mdb_k_str(id), &d, &d_size, &d_exists);
-        if (!res/*err*/) goto cleanup_errno;
-        if (d_exists) {
-            fwrite(d, 1, d_size, stdout);
-            fputc('\n', stdout);
+        if (ownership_p) {
+            res = mdb_auth_check_owner(db, datatype, id_k);
+            if (!res/*err*/) goto cleanup;
         }
+        res = mdb_search(db, datatype, id_k, &d, &d_size, NULL);
+        if (!res/*err*/) goto cleanup;
+        fwrite(d, 1, d_size, stdout);
+        fputc('\n', stdout);
         break;
     case 'd':
-        res = mdb_delete(db, datatype, mdb_k_str(id));
-        if (!res/*err*/) goto cleanup_errno;
+        if (ownership_p) {
+            res = mdb_auth_delete(db, datatype, id_k);
+        } else {
+            res = mdb_delete(db, datatype, id_k);
+        }
+        if (!res/*err*/) goto cleanup;
         break;
     case 'l':
-        res = mdb_iter_create(db, datatype,(authorization_get_username())?true:false, &iter);
+        if (ownership_p) {
+            res = mdb_auth_iter_create(db, datatype, &iter);
+        } else {
+            res = mdb_iter_create(db, datatype, &iter);
+        }
         if (!res/*err*/) goto cleanup;
-        while (mdb_iter_loop(iter, &key)) {
-            mdb_k_print(key, stdout);
+        while (mdb_iter_loop(iter, &id_k)) {
+            mdb_k_print(id_k, stdout);
             fputc('\n', stdout);
         }
         res = mdb_iter_destroy(&iter);
-        if (!res/*err*/) goto cleanup;
-        break;
-    case 'c':
-        res = mdb_authorized(db, datatype, mdb_k_str(id), NULL);
-        if (!res/*err*/) goto cleanup;
-        break;
-    case 'o':
-        res = mdb_set_owner(db, datatype, mdb_k_str(id), NULL);
         if (!res/*err*/) goto cleanup;
         break;
     }
