@@ -4,7 +4,7 @@ PREFIX     =/usr/local
 VARDIR     =/var/lib
 AR         =ar
 CC         =gcc
-CFLAGS     =-Wall -g
+CFLAGS     =-Wall -g -DRELEASE
 CPPFLAGS   =
 LIBS       ="-l:libgdbm.a" "-l:libuuid.a"
 ## Sources and targets
@@ -20,9 +20,10 @@ CFLAGS_ALL =$(LDFLAGS) $(CFLAGS) $(CPPFLAGS)
 ## STANDARD TARGETS
 all: $(PROGRAMS) $(LIBRARIES)
 help:
-	@echo "all     : Build everything."
-	@echo "clean   : Clean files."
-	@echo "install : Install all produced files."
+	@echo "all        : Build everything."
+	@echo "clean      : Clean files."
+	@echo "install    : Install all produced files."
+	@echo "install-db : Create database."
 install: all
 	install -d                  $(DESTDIR)$(PREFIX)/bin
 	install -m755 $(PROGRAMS)   $(DESTDIR)$(PREFIX)/bin
@@ -32,6 +33,7 @@ install: all
 	install -m644 $(LIBRARIES)  $(DESTDIR)$(PREFIX)/lib
 	install -d                  $(DESTDIR)$(PREFIX)/share/man/man3	
 	install -m644 $(MANPAGES_3) $(DESTDIR)$(PREFIX)/share/man/man3
+install-db:
 	install -d                  $(DESTDIR)$(VARDIR)/mdb
 	chmod a+rwx                 $(DESTDIR)$(VARDIR)/mdb
 clean:
