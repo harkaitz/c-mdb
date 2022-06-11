@@ -60,28 +60,31 @@ bool mdb_create(mdb **_mdb, cstr _opts[]) {
     mdb         *mdb = NULL;
     cstr        *opt = NULL;
     struct stat  s   = {0};
-    int          e   = 0;
-    /* Allocate memory. */
+    int          e;
+    
     mdb = calloc(1, sizeof(struct mdb));
     if (!mdb/*err*/) goto c_errno;
-    /* Get database directory. */
+
+    
     mdb->db_dir = MDB_DEFAULT_DIRECTORY;
-    for (opt = _opts; _opts && *opt; opt+=2) {
-        if (!strcasecmp(*opt, "mdb_directory")) {
-            mdb->db_dir = *(opt+1);
+    if (_opts) {
+        for (opt = _opts; *opt; opt+=2) {
+            if (*(opt+1) && !strcasecmp(*opt, "mdb_directory")) {
+                mdb->db_dir = *(opt+1);
+            }
         }
     }
-    /* Check whether it exists and it is the correct type. */
-    e = stat(mdb->db_dir, &s);
-    if (e==-1) {
+    
+    if (stat(mdb->db_dir, &s)==-1) {
         if (errno != ENOENT/*err*/) goto c_errno;
         e = mkdir(mdb->db_dir, MDB_MODE_DIR);
         if (e==-1/*err*/) goto c_errno_mkdir;
     }
+
     if (!S_ISDIR(s.st_mode)/*err*/) goto c_errno_notdir;
     e = access(mdb->db_dir, R_OK|X_OK);
     if (e==-1/*err*/) goto c_errno_no_read_access;
-    /* Success. */
+    
     *_mdb = mdb;
     debug("Database started.");
     return true;
@@ -318,6 +321,9 @@ bool mdb_search_cp(mdb *_db, cstr _t, mdb_k _id, void *_d, size_t _dsz, bool *_o
     if (d) {
         if (_dsz < dsz/*err*/) goto cleanup_invalid_size;
         memcpy(_d, d, dsz);
+        if (_dsz>dsz) {
+            memset(_d+dsz, 0, _dsz-dsz);
+        }
     }
     ret = true;
     goto cleanup;

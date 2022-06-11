@@ -25,7 +25,7 @@ bool mdb_create  (mdb **_db, cstr opts[]);
 void mdb_destroy (mdb  *_db);
 
 bool mdb_open    (mdb  *_db, cstr _t, cstr _mode/*rws*/, unsigned _chmod);
-bool mdb_open_f  (mdb  *_db, cstr _t, cstr _mode, unsigned _chmod, cstr _fmt, ...);
+bool mdb_open_f  (mdb  *_db, cstr _t, cstr _mode       , unsigned _chmod, cstr _fmt, ...);
 void mdb_close   (mdb  *_db, cstr _t);
 
 bool mdb_insert    (mdb *_db, cstr _t, mdb_k _id, const void *_d, size_t  _dsz);
@@ -38,8 +38,7 @@ bool mdb_iter_create  (mdb *_db, cstr _t, mdb_iter **_iter);
 bool mdb_iter_destroy (mdb_iter **_iter);
 bool mdb_iter_loop    (mdb_iter  *_iter, mdb_k *_key);
 
-bool mdb_auth_insert_owner   (mdb *_db, cstr _t, mdb_k _key);
-
+bool mdb_auth_insert_owner (mdb *_db, cstr _t, mdb_k _key);
 bool mdb_auth_check_owner  (mdb *_db, cstr _t, mdb_k _key);
 bool mdb_auth_delete       (mdb *_db, cstr _t, mdb_k _key);
 bool mdb_auth_iter_create  (mdb *_db, cstr _t, mdb_iter **_iter);
