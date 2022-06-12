@@ -117,6 +117,7 @@ void mdb_destroy(mdb *_mdb) {
 
 void mdb_leg_close(mdb_leg *_leg) {
     if (_leg->gdbm) {
+        //info("GDBM %p: Closing...", _leg);
         gdbm_close(_leg->gdbm);
     }
     memset(_leg, 0, sizeof(mdb_leg));
@@ -135,9 +136,10 @@ bool mdb_leg_open (mdb_leg *_leg, cstr _filename, cstr _t, cstr _mode, unsigned 
         error("%s: %s", _t, strerror(errno));
         return false;
     }
-    if (strchr(_mode, 's')) {
-        flags_i |= GDBM_SYNC;
-    }
+    //if (strchr(_mode, 's')) {
+    //    flags_i |= GDBM_SYNC;
+    //}
+    //info("GDBM %p: Openning %s", _leg, _filename);
     _leg->gdbm  = gdbm_open(_filename, 0, flags_i, _chmod, NULL);
     if (!_leg->gdbm) {
         error("%s: %s", _t, gdbm_strerror(gdbm_errno));
@@ -147,6 +149,7 @@ bool mdb_leg_open (mdb_leg *_leg, cstr _filename, cstr _t, cstr _mode, unsigned 
         mdb_leg_close(_leg);
         return false;
     }
+    //info("GDBM %p: Openned %s", _leg, _filename);
     chmod(_filename, _chmod);
     strncpy(_leg->datatype, _t, sizeof(_leg->datatype)-1);
     _leg->mode     = _mode;
