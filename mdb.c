@@ -13,7 +13,7 @@
 #include <types/bool_ss.h>
 #include <str/sizes.h>
 #include <str/strdupa.h>
-#include <io/slog.h>
+#include <syslog.h>
 
 #ifndef MDB_DEFAULT_DIRECTORY
 #  define MDB_DEFAULT_DIRECTORY "/var/lib/mdb"
@@ -86,12 +86,12 @@ bool mdb_create(mdb **_mdb, cstr _opts[]) {
     if (e==-1/*err*/) goto c_errno_no_read_access;
     
     *_mdb = mdb;
-    debug("Database started.");
+    syslog(LOG_DEBUG, "Database started.");
     return true;
- c_errno:                error("%s", strerror(errno)); goto cleanup;
- c_errno_mkdir:          error("%s: Can't create: %s", mdb->db_dir, strerror(errno)); goto cleanup;
- c_errno_notdir:         error("%s: Not a directory.", mdb->db_dir); goto cleanup;
- c_errno_no_read_access: error("%s: Can't read."     , mdb->db_dir); goto cleanup;
+ c_errno:                syslog(LOG_ERR, "%s", strerror(errno)); goto cleanup;
+ c_errno_mkdir:          syslog(LOG_ERR, "%s: Can't create: %s", mdb->db_dir, strerror(errno)); goto cleanup;
+ c_errno_notdir:         syslog(LOG_ERR, "%s: Not a directory.", mdb->db_dir); goto cleanup;
+ c_errno_no_read_access: syslog(LOG_ERR, "%s: Can't read."     , mdb->db_dir); goto cleanup;
  cleanup:
     if (mdb) free(mdb);
     return false;
@@ -101,11 +101,11 @@ void mdb_destroy(mdb *_mdb) {
     if (_mdb) {
         for (int i=0; i<_mdb->legsz; i++) {
             if (_mdb->legs[i].gdbm) {
-                debug("%s: Closing ...", _mdb->legs[i].datatype);
+                syslog(LOG_DEBUG, "%s: Closing ...", _mdb->legs[i].datatype);
             }
             mdb_leg_close(&_mdb->legs[i]);
         }
-        debug("All databases closed.");
+        syslog(LOG_DEBUG, "All databases closed.");
         free(_mdb);
     }
 }
@@ -133,7 +133,7 @@ bool mdb_leg_open (mdb_leg *_leg, cstr _filename, cstr _t, cstr _mode, unsigned 
     } else if (errno == ENOENT) {
         flags_i |= GDBM_WRCREAT;
     } else {
-        error("%s: %s", _t, strerror(errno));
+        syslog(LOG_ERR, "%s: %s", _t, strerror(errno));
         return false;
     }
     //if (strchr(_mode, 's')) {
@@ -142,9 +142,9 @@ bool mdb_leg_open (mdb_leg *_leg, cstr _filename, cstr _t, cstr _mode, unsigned 
     //info("GDBM %p: Openning %s", _leg, _filename);
     _leg->gdbm  = gdbm_open(_filename, 0, flags_i, _chmod, NULL);
     if (!_leg->gdbm) {
-        error("%s: %s", _t, gdbm_strerror(gdbm_errno));
+        syslog(LOG_ERR, "%s: %s", _t, gdbm_strerror(gdbm_errno));
         if (gdbm_check_syserr(gdbm_errno)) {
-            error("%s: %s", _t, strerror(errno));
+            syslog(LOG_ERR, "%s: %s", _t, strerror(errno));
         }
         mdb_leg_close(_leg);
         return false;
@@ -232,15 +232,15 @@ bool mdb_open_f(mdb *_mdb, cstr _t, cstr _mode, unsigned _chmod, cstr _fmt, ...)
     if (fsz >= sizeof(f)/*err*/) goto cleanup_name_too_long;
 
     /* Open leg. */
-    debug("%s: Openning %s ...", _t, f);
+    syslog(LOG_DEBUG, "%s: Openning %s ...", _t, f);
     return mdb_leg_open(leg, f, _t, _mode, _chmod);
     
     /* Failures. */
  cleanup_limit_reached:
-    error("%s: Too much tables openned.", _t);
+    syslog(LOG_ERR, "%s: Too much tables openned.", _t);
     return false;
  cleanup_name_too_long:
-    error("%s: Name too long.", _t);
+    syslog(LOG_ERR, "%s: Name too long.", _t);
     return false;
 }
 
@@ -262,11 +262,11 @@ bool mdb_insert(mdb *_mdb, cstr _t, mdb_k _id, const void *_d, size_t _dsz) {
     int r = gdbm_store(leg->gdbm, _id, d, GDBM_INSERT);
     if (r==-1/*err*/) goto fail_gdbm;
     if (r==+1/*err*/) goto fail_exists;
-    debug("%s: Inserted %li bytes.", _t, _dsz);
+    syslog(LOG_DEBUG, "%s: Inserted %li bytes.", _t, _dsz);
     return true;
-    fail_gdbm:        error("%s: Invalid key or data.", _t);   return false;
-    fail_exists:      error("%s: Object already exists.", _t); return false;
-    fail_not_openned: error("%s: Not openned.", _t);           return false;
+    fail_gdbm:        syslog(LOG_ERR, "%s: Invalid key or data.", _t);   return false;
+    fail_exists:      syslog(LOG_ERR, "%s: Object already exists.", _t); return false;
+    fail_not_openned: syslog(LOG_ERR, "%s: Not openned.", _t);           return false;
 }
 
 bool mdb_replace(mdb *_db, cstr _t, mdb_k _id, const void *_d, size_t _dsz) {
@@ -275,10 +275,10 @@ bool mdb_replace(mdb *_db, cstr _t, mdb_k _id, const void *_d, size_t _dsz) {
     datum d = {.dptr = (void*)_d, .dsize = _dsz };
     int r = gdbm_store(leg->gdbm, _id, d, GDBM_REPLACE);
     if (r==-1/*err*/) goto fail_gdbm;
-    debug("%s: Replaced %li bytes.", _t, _dsz);
+    syslog(LOG_DEBUG, "%s: Replaced %li bytes.", _t, _dsz);
     return true;
-    fail_gdbm:        error("%s: Invalid key or data.", _t); return false;
-    fail_not_openned: error("%s: Not openned for writting.", _t); return false;
+    fail_gdbm:        syslog(LOG_ERR, "%s: Invalid key or data.", _t); return false;
+    fail_not_openned: syslog(LOG_ERR, "%s: Not openned for writting.", _t); return false;
 }
 
 bool mdb_search(mdb *_db, cstr _t, mdb_k _id, void **_d, size_t *_dsz, bool *_opt_exists) {
@@ -297,7 +297,7 @@ bool mdb_search(mdb *_db, cstr _t, mdb_k _id, void **_d, size_t *_dsz, bool *_op
     if (_opt_exists) {
         *_opt_exists = true;
     }
-    debug("%s: Retrieved data", _t);
+    syslog(LOG_DEBUG, "%s: Retrieved data", _t);
     return true;
  fail_fetch:
     if (_d)   *_d   = NULL;
@@ -305,14 +305,14 @@ bool mdb_search(mdb *_db, cstr _t, mdb_k _id, void **_d, size_t *_dsz, bool *_op
     if (_opt_exists) {
         *_opt_exists = false;
         if (gdbm_errno == GDBM_ITEM_NOT_FOUND) {
-            debug("%s: Field does not exist.", _t);
+            syslog(LOG_DEBUG, "%s: Field does not exist.", _t);
             return true;
         }
     }
-    error("%s: Can't read: %s", _t, gdbm_strerror(gdbm_errno));
+    syslog(LOG_ERR, "%s: Can't read: %s", _t, gdbm_strerror(gdbm_errno));
     return false;
  fail_not_openned:
-    error("%s: Not openned for reading.", _t);
+    syslog(LOG_ERR, "%s: Not openned for reading.", _t);
     return false;
 }
 
@@ -331,7 +331,7 @@ bool mdb_search_cp(mdb *_db, cstr _t, mdb_k _id, void *_d, size_t _dsz, bool *_o
     ret = true;
     goto cleanup;
  cleanup_invalid_size:
-    error("Got invalid sized data.");
+    syslog(LOG_ERR, "Got invalid sized data.");
     goto cleanup;
  cleanup:
     if (d) free(d);
@@ -342,9 +342,9 @@ bool mdb_delete(mdb *_db, cstr _t, mdb_k _id) {
     mdb_leg *leg = mdb_leg_search(_db, _t, "w");
     if (!leg/*err*/) goto fail_not_openned;
     gdbm_delete(leg->gdbm, _id);
-    debug("%s: Field deleted.", _t);
+    syslog(LOG_DEBUG, "%s: Field deleted.", _t);
     return true;
-    fail_not_openned: error("%s: Not openned.", _t); return false;
+    fail_not_openned: syslog(LOG_ERR, "%s: Not openned.", _t); return false;
 }
 
 /* --------------------------------------------------------------------------
@@ -363,10 +363,10 @@ bool mdb_iter_create(mdb *_db, cstr _t, mdb_iter **_iter) {
     if (!(*_iter)->next.dptr) {
         (*_iter)->errcode = gdbm_errno;
     }
-    debug("%s: Iteration start.", _t);
+    syslog(LOG_DEBUG, "%s: Iteration start.", _t);
     return true;
-    cleanup_not_openned: error("%s: Not openned.", _t);        return false;
-    cleanup_errno:       error("%s: %s", _t, strerror(errno)); return false;
+    cleanup_not_openned: syslog(LOG_ERR, "%s: Not openned.", _t);        return false;
+    cleanup_errno:       syslog(LOG_ERR, "%s: %s", _t, strerror(errno)); return false;
 }
 
 bool mdb_iter_destroy(mdb_iter **_iter) {
@@ -388,7 +388,7 @@ bool mdb_iter_loop(mdb_iter *_iter, mdb_k *_key) {
     }
     if (!_iter->next.dptr) {
         if (_iter->errcode != GDBM_ITEM_NOT_FOUND) {
-            error("%s", gdbm_strerror(_iter->errcode));
+            syslog(LOG_ERR, "%s", gdbm_strerror(_iter->errcode));
             _iter->success = false;
         }
         return false;
@@ -418,8 +418,8 @@ bool mdb_auth_init (mdb *_db, cstr _t) {
     res = mdb_open_f(_db, type, "rw", leg->perm, "%s", user);
     if (!res/*err*/) return false;
     return true;
-    fail_unauthenticated: error("Auth %s: Unauthenticated", _t); return false;
-    fail_not_openned:     error("Auth %s: Not openned.", _t);    return false;
+    fail_unauthenticated: syslog(LOG_ERR, "Auth %s: Unauthenticated", _t); return false;
+    fail_not_openned:     syslog(LOG_ERR, "Auth %s: Not openned.", _t);    return false;
 }
 
 bool mdb_auth_insert_owner (mdb *_db, cstr _t, mdb_k _key) {
@@ -451,9 +451,9 @@ bool mdb_auth_delete (mdb *_db, cstr _t, mdb_k _key) {
     if (gdbm_delete(leg2->gdbm, _key)==0) {
         gdbm_delete(leg1->gdbm, _key);
     }
-    debug("%s: Deleted authenticated.", _t);
+    syslog(LOG_DEBUG, "%s: Deleted authenticated.", _t);
     return true;
-    fail_not_openned: error("%s: Not openned.", _t); return false;
+    fail_not_openned: syslog(LOG_ERR, "%s: Not openned.", _t); return false;
 }
 
 bool mdb_auth_iter_create(mdb *_db, cstr _t, mdb_iter **_iter) {
@@ -500,7 +500,7 @@ mdb_k mdb_k_uuid_str (cstr _s, uuid_t _uuid) {
         return mdb_k_uuid(_uuid);
     } else {
         mdb_k k = {0};
-        error("Invalid UUID: %s", _s);
+        syslog(LOG_ERR, "Invalid UUID: %s", _s);
         return k;
     }
 }
