@@ -6,14 +6,13 @@ AR         =ar
 CC         =gcc
 CFLAGS     =-Wall -g -DRELEASE
 CPPFLAGS   =
-LIBS       ="-l:libgdbm.a" "-l:libuuid.a"
+LIBS       ="-l:libhiredis.a" "-l:libuuid.a"
 ## Sources and targets
 PROGRAMS   =mdb
 LIBRARIES  =libmdb.a
 HEADERS    =mdb.h
 MARKDOWNS  =README.md mdb.3.md
-MANPAGES_3 =mdb.3
-SOURCES    =mdb.c
+SOURCES    =mdb-hiredis.c
 ## AUXILIARY
 CFLAGS_ALL =$(LDFLAGS) $(CFLAGS) $(CPPFLAGS)
 
@@ -31,15 +30,11 @@ install: all
 	install -m644 $(HEADERS)    $(DESTDIR)$(PREFIX)/include
 	install -d                  $(DESTDIR)$(PREFIX)/lib
 	install -m644 $(LIBRARIES)  $(DESTDIR)$(PREFIX)/lib
-	install -d                  $(DESTDIR)$(PREFIX)/share/man/man3	
-	install -m644 $(MANPAGES_3) $(DESTDIR)$(PREFIX)/share/man/man3
 install-db:
 	install -d                  $(DESTDIR)$(VARDIR)/mdb
 	chmod a+rwx                 $(DESTDIR)$(VARDIR)/mdb
 clean:
 	rm -f $(PROGRAMS) $(LIBRARIES)
-ssnip:
-	ssnip LICENSE $(MARKDOWNS) $(HEADERS) $(SOURCES) $(MANPAGES_3)
 
 ## LIBRARY
 libmdb.a: $(SOURCES) $(HEADERS)
@@ -49,3 +44,16 @@ libmdb.a: $(SOURCES) $(HEADERS)
 	rm -f .b/*.o
 mdb: main.c libmdb.a
 	$(CC) -o $@ main.c libmdb.a $(CFLAGS_ALL) $(LIBS)
+## -- manpages --
+MAN_3=./mdb.3 
+install: install-man3
+install-man3: $(MAN_3)
+	mkdir -p $(DESTDIR)$(PREFIX)/share/man/man3
+	cp $(MAN_3) $(DESTDIR)$(PREFIX)/share/man/man3
+## -- manpages --
+## -- license --
+install: install-license
+install-license: LICENSE
+	mkdir -p $(DESTDIR)$(PREFIX)/share/doc/c-mdb
+	cp LICENSE $(DESTDIR)$(PREFIX)/share/doc/c-mdb
+## -- license --
