@@ -11,18 +11,11 @@ LIBS       ="-l:libhiredis.a" "-l:libuuid.a"
 PROGRAMS   =mdb
 LIBRARIES  =libmdb.a
 HEADERS    =mdb.h
-MARKDOWNS  =README.md mdb.3.md
 SOURCES    =mdb-hiredis.c
 ## AUXILIARY
 CFLAGS_ALL =$(LDFLAGS) $(CFLAGS) $(CPPFLAGS)
 
-## STANDARD TARGETS
 all: $(PROGRAMS) $(LIBRARIES)
-help:
-	@echo "all        : Build everything."
-	@echo "clean      : Clean files."
-	@echo "install    : Install all produced files."
-	@echo "install-db : Create database."
 install: all
 	install -d                  $(DESTDIR)$(PREFIX)/bin
 	install -m755 $(PROGRAMS)   $(DESTDIR)$(PREFIX)/bin
@@ -30,13 +23,8 @@ install: all
 	install -m644 $(HEADERS)    $(DESTDIR)$(PREFIX)/include
 	install -d                  $(DESTDIR)$(PREFIX)/lib
 	install -m644 $(LIBRARIES)  $(DESTDIR)$(PREFIX)/lib
-install-db:
-	install -d                  $(DESTDIR)$(VARDIR)/mdb
-	chmod a+rwx                 $(DESTDIR)$(VARDIR)/mdb
 clean:
 	rm -f $(PROGRAMS) $(LIBRARIES)
-
-## LIBRARY
 libmdb.a: $(SOURCES) $(HEADERS)
 	mkdir -p .b
 	cd .b && $(CC) -c $(SOURCES:%=../%) $(CFLAGS_ALL)
