@@ -34,6 +34,16 @@ mdb_k mdb_k_uuid_str (char const _s[], uuid_t _uuid);
 mdb_k mdb_k_str      (char const _s[]);
 void  mdb_k_print    (mdb_k _id, FILE *_fp1);
 
+/* Authorization support. */
+__attribute__((weak))
+bool mdb_insert_auth(mdb *_db, char const _t[], mdb_k _id, const void *_d, size_t  _dsz);
+__attribute__((weak))
+bool mdb_replace_auth(mdb *_db, char const _t[], mdb_k _id, const void *_d, size_t  _dsz);
+__attribute__((weak))
+bool mdb_search_auth(mdb *_db, char const _t[], mdb_k _id, void **_d, size_t *_dsz, bool *_opt_exists);
+__attribute__((weak))
+bool mdb_delete_auth(mdb *_db, char const _t[], mdb_k _id);
+
 
 #endif
 

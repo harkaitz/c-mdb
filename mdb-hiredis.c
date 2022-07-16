@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <syslog.h>
 #include <hiredis/hiredis.h>
+#include <sys/authorization.h>
 
 struct mdb_map {
     char  *type;
@@ -145,6 +146,7 @@ bool mdb_insert (mdb *_mdb, char const *_t, mdb_k _id, void const *_d, size_t _d
     size_t         argl[] = {strlen(argv[0]), strlen(table), _id.dsize, _dsz};
     size_t         argc   = 4;
 
+    if (mdb_insert_auth && !mdb_insert_auth(_mdb, _t, _id, _d, _dsz)) return false;
     
     reply = redisCommandArgv(_mdb->redis, argc, argv, argl);
     if (!reply/*err*/)                             goto error_redis_ctx;
@@ -178,6 +180,8 @@ bool mdb_replace (mdb *_mdb, char const *_t, mdb_k _id, void const *_d, size_t _
     char const *argv[] = {"HSET"         , table        , _id.dptr , _d};
     size_t      argl[] = {strlen(argv[0]), strlen(table), _id.dsize, _dsz};
     size_t      argc   = 4;
+
+    if (mdb_replace_auth && !mdb_replace_auth(_mdb, _t, _id, _d, _dsz)) return false;
     
     reply = redisCommandArgv(_mdb->redis, argc, argv, argl);
     if (!reply/*err*/)                             goto error_redis_ctx;
@@ -208,6 +212,8 @@ bool mdb_search(mdb *_mdb, char const *_t, mdb_k _id, void **_d, size_t *_dsz, b
     size_t      argl[] = {strlen(argv[0]), strlen(table), _id.dsize};
     size_t      argc   = 3;
 
+    if (mdb_search_auth && !mdb_search_auth(_mdb, _t, _id, _d, _dsz, _opt_exists)) return false;
+    
     reply = redisCommandArgv(_mdb->redis, argc, argv, argl);
     if (!reply/*err*/)                             goto error_redis_ctx;
     if (reply->type == REDIS_REPLY_ERROR/*err*/)   goto error_redis;
